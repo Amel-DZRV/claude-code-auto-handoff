@@ -55,3 +55,7 @@ claude plugin test .
 - Percent comes from `$.session.usage().context.percent`; request tokens come from the API's usage on each `turn.step`.
 - The cache countdown assumes a cache lifetime (the `ttl` setting); the mod cannot read the real value.
 - With no project folder the handoff file lands in the session's scratch workspace, which is deleted with the session.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
