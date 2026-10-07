@@ -1,0 +1,4 @@
+# Written by the engine each time it loads a mod from a folder
+.claude-plugin/types/
+tsconfig.json
+node_modules/

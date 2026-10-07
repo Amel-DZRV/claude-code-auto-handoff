@@ -1,0 +1,7 @@
+{
+  "name": "auto-handoff",
+  "version": "0.3.0",
+  "description": "Shows a context bar with a red handoff mark, the prompt-cache countdown and per-request tokens. When context passes a threshold it writes a handoff summary, clears the session and loads the summary into the fresh one.",
+  "author": { "name": "Amel-DZRV", "url": "https://github.com/Amel-DZRV" },
+  "types": "./types/index.d.ts"
+}
