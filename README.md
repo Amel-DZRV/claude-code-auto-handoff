@@ -23,7 +23,17 @@ Seen working in Claude Code Desktop: the bar, the cache countdown, the per-reque
 
 Hot reloading, for trying it out: copy this folder to `~/.claude/dev-mods/<session-id>/auto-handoff/` and answer "Enable for this session" when Claude Code asks.
 
-For every session: point `CLAUDE_CODE_PLUGIN_DIRS` at the folder (or `claude --plugin-dir <folder>` in a terminal).
+For every session: clone the repo and add its absolute path to the `env` block of `~/.claude/settings.json` (several folders are separated by `;` on Windows, `:` elsewhere):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "C:\\dev\\claude-code-auto-handoff"
+  }
+}
+```
+
+New sessions load the mod from that folder and reload it when a file in it is saved. In a terminal you can use `claude --plugin-dir <folder>` instead.
 
 Do not keep two copies of the mod loaded at once. They share a name, and an older copy can answer the commands before the newer one.
 
