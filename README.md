@@ -65,6 +65,8 @@ claude plugin test .
 - Percent comes from `$.session.usage().context.percent`; request tokens come from the API's usage on each `turn.step`.
 - The cache countdown assumes a cache lifetime (the `ttl` setting); the mod cannot read the real value.
 - Where the handoff is saved: in a project, `<project>/.claude/handoff.md`. Every handoff also gets a copy in `~/.claude/handoffs/handoff-1.md` to `handoff-5.md`; when all five exist the oldest is overwritten. A session with no project folder works in a scratch workspace that is deleted with the session, so it uses only the home copy.
+- The automatic handoff only runs when a turn ends, right after the last request, so the prompt cache is warm and the summary reuses it. The threshold is the only knob; there is no separate "early" setting. `/handoff-now` can run any time and warns when the cache is cold.
+- Not done, on purpose: cache keep-alive pings (they cost real money) and a session cost estimate (the mod cannot read prices).
 
 ## License
 
