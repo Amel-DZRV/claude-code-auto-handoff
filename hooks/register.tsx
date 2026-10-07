@@ -236,6 +236,11 @@ const handoff = async ($: any, why: string): Promise<string> => {
   isBusy = true
   try {
     const settings = await loadSettings($)
+    await say(
+      $,
+      `${why}. Writing a handoff summary` +
+        (settings.autoClear ? ', then starting a fresh session that picks up where this one left off.' : '. Run /clear afterwards to load it into a fresh session.'),
+    )
     const seen = await getRequests($)
     const left = cacheLeft(seen.rows, seen.ttlMinutes, await $.clock.now())
     const last = lastMain(seen.rows)
