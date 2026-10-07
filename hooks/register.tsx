@@ -302,15 +302,13 @@ const describe = (s: Settings) =>
   `bar: ${s.showBar ? 'shown' : 'hidden'} · cache ttl: ${s.cacheTtlMinutes}m`
 
 const USAGE =
-  'Usage: /auto-handoff [on|off|status|<percent>|clear on|off|resume on|off|bar on|off|ttl <minutes>|tokens|diag]'
+  'Usage: /auto-handoff [on|off|status|<percent>|clear on|off|resume on|off|bar on|off|ttl <minutes>|tokens]'
 
 // Green while well under the mark, yellow as it nears, red once past it.
 const fillColor = (percent: number, threshold: number): 'red' | 'yellow' | 'green' =>
   percent >= threshold ? 'red' : percent >= threshold * 0.8 ? 'yellow' : 'green'
 
 export const register: Register = on => {
-  const asked: Record<string, number> = {}
-
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'auto-handoff',
@@ -397,14 +395,6 @@ export const register: Register = on => {
     const [first, second] = words
 
     if (first === 'tokens') return { text: tokenReport(await getRequests($), await $.clock.now()) }
-    if (first === 'diag') {
-      const surfaces = await $.session.surfaces()
-      return {
-        text:
-          `surfaces: ${surfaces.join(', ') || 'none'} · render hooks asked since load: ` +
-          (Object.entries(asked).map(([name, count]) => `${name} ${count}`).join(', ') || 'none yet'),
-      }
-    }
     if (first === 'status' || first === undefined) {
       const last = (await $.store.get('lastHandoff')) as { at: number; text: string } | undefined
       const when = last === undefined ? '' : ` · last handoff ${clock(last.at)}: ${last.text}`
@@ -433,25 +423,8 @@ export const register: Register = on => {
     return { text: describe(settings) }
   })
 
-  // The footer fallback: a small text bar among the mode labels at the right of the prompt.
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    asked.SessionMode = (asked.SessionMode ?? 0) + 1
-    const state = await read($, bar)
-    if (!state.isShown) return next(e)
-
-    const cells = 20
-    const filled = Math.round(((state.percent ?? 0) / 100) * cells)
-    const mark = Math.min(cells - 1, Math.round((state.threshold / 100) * cells))
-    const glyphs = Array.from({ length: cells }, (_, i) =>
-      i === mark && state.isEnabled ? '┃' : i < filled ? '█' : '░',
-    ).join('')
-    const label = state.percent === null ? '--%' : `${state.percent}%`
-    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, `ctx ${glyphs} ${label}`] } })
-  })
-
   // The bar: cells filled for the context used, a mark at the handoff threshold.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    asked.AbovePrompt = (asked.AbovePrompt ?? 0) + 1
     const state = await read($, bar)
     if (e.props.hasSurvey || !state.isShown) return next(e)
 
