@@ -21,6 +21,17 @@ Seen working in Claude Code Desktop: the bar, the cache countdown, the per-reque
 
 ## Install
 
+From the marketplace in this repo (any machine, terminal or the Desktop app's Code tab):
+
+```bash
+claude plugin marketplace add Amel-DZRV/claude-code-auto-handoff
+claude plugin install auto-handoff@amel-mods
+```
+
+Run `/reload-plugins` in an open session. Update later with `claude plugin marketplace update amel-mods`; bump `version` in `.claude-plugin/plugin.json` when you push a change.
+
+Other options:
+
 Hot reloading, for trying it out: copy this folder to `~/.claude/dev-mods/<session-id>/auto-handoff/` and answer "Enable for this session" when Claude Code asks.
 
 For every session: clone the repo and add its absolute path to the `env` block of `~/.claude/settings.json` (several folders are separated by `;` on Windows, `:` elsewhere):

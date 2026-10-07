@@ -1,0 +1,12 @@
+{
+  "name": "amel-mods",
+  "description": "Claude Code mods by Amel-DZRV",
+  "owner": { "name": "Amel-DZRV", "url": "https://github.com/Amel-DZRV" },
+  "plugins": [
+    {
+      "name": "auto-handoff",
+      "source": "./",
+      "description": "Context bar, prompt-cache countdown, and automatic handoff at a context threshold."
+    }
+  ]
+}
