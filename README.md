@@ -10,14 +10,14 @@ Last request · Input: 233k (99% cached, 2k new) · Output: 351
 - **Context bar**, always above the prompt, scaled 0-100% with a red line at the handoff threshold (default 50%). Green, then yellow, then red as it nears and passes the line. The desktop app draws a vector bar; the terminal draws block characters.
 - **Prompt-cache countdown** at the right of the bar: how long the cache stays warm after the last request.
 - **Last request**: the full input size, how much of it came from the cache, how much was new, and the output tokens.
-- **Auto-handoff**: when context passes the threshold, the mod asks the model for a handoff summary (from the cached transcript when it is still warm), saves it to `.claude/handoff.md`, runs `/clear`, and loads the summary into the fresh session once.
+- **Auto-handoff**: when context passes the threshold, the mod asks the model for a handoff summary (from the cached transcript when it is still warm), saves it (see below), runs `/clear`, and loads the summary into the fresh session once.
 
 ## Status
 
 Early. The mod uses Claude Code's early-access plugin API, which may change without notice.
 
-Seen working in Claude Code Desktop: the bar, the cache countdown, the per-request line and the slash commands.
-**Not yet verified live:** the automatic `/clear` and the load into the new session. If `/clear` is refused, the summary is still saved and the mod says so in the transcript.
+Seen working in Claude Code Desktop: the bar, the cache countdown, the per-request line, the slash commands, and the handoff itself (the summary is saved, the session is cleared, the summary is loaded into the fresh session, and the mod keeps running after the clear).
+**Not yet verified live:** the threshold trigger (the handoff has been run from `/handoff-now`), and the home-folder copies of the handoff (covered by tests only). If `/clear` is refused, the summary is still saved and the mod says so in the transcript.
 
 ## Install
 
@@ -54,7 +54,7 @@ claude plugin test .
 
 - Percent comes from `$.session.usage().context.percent`; request tokens come from the API's usage on each `turn.step`.
 - The cache countdown assumes a cache lifetime (the `ttl` setting); the mod cannot read the real value.
-- With no project folder the handoff file lands in the session's scratch workspace, which is deleted with the session.
+- Where the handoff is saved: in a project, `<project>/.claude/handoff.md`. Every handoff also gets a copy in `~/.claude/handoffs/handoff-1.md` to `handoff-5.md`; when all five exist the oldest is overwritten. A session with no project folder works in a scratch workspace that is deleted with the session, so it uses only the home copy.
 
 ## License
 

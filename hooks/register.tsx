@@ -36,6 +36,8 @@ const SVG_HEIGHT = 18
 const SVG_COLORS = { green: '#2da44e', yellow: '#d4a72c', red: '#e5484d' } as const
 const MAX_PENDING_AGE_MS = 6 * 60 * 60 * 1000
 const HANDOFF_FILE = '.claude/handoff.md'
+const KEPT_DIR = '.claude/handoffs'
+const KEPT_SLOTS = 5
 
 const SUMMARY_PROMPT = `Write a handoff for a fresh Claude Code session that will continue this work with no memory of this conversation.
 Use exactly these sections, in markdown:
@@ -209,6 +211,26 @@ const summarize = async ($: any): Promise<string | undefined> => {
   return completed.isAnswered && completed.text.trim() !== '' ? completed.text : undefined
 }
 
+const slash = (path: string): string => path.replace(/\\/g, '/').replace(/\/$/, '')
+
+// A session started with no project folder works in a scratch workspace that is deleted with it.
+const isScratch = (root: string): boolean => root.includes('/scratch-workspaces/')
+
+// The newest KEPT_SLOTS handoffs live in the home folder; there is no delete, so a full set reuses the oldest slot.
+const keepCopy = async ($: any, content: string): Promise<string | undefined> => {
+  const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
+  if (typeof home !== 'string' || home === '') return undefined
+  const dir = `${slash(home)}/${KEPT_DIR}`
+  const entries: { name: string; mtimeMs: number }[] = await $.fs.list(dir).catch(() => [])
+  const slots = Array.from({ length: KEPT_SLOTS }, (_, i) => `handoff-${i + 1}.md`)
+  const taken = new Map(entries.map(entry => [entry.name, entry.mtimeMs]))
+  const free = slots.find(name => !taken.has(name))
+  const oldest = [...slots].sort((a, b) => (taken.get(a) ?? 0) - (taken.get(b) ?? 0))[0]
+  const path = `${dir}/${free ?? oldest}`
+  await $.fs.write(path, content)
+  return path
+}
+
 const handoff = async ($: any, why: string): Promise<string> => {
   if (isBusy) return 'A handoff is already running.'
   isBusy = true
@@ -227,11 +249,19 @@ const handoff = async ($: any, why: string): Promise<string> => {
     }
 
     const sessionId: string = await $.session.id()
-    const root = String(await $.session.root()).replace(/\\/g, '/').replace(/\/$/, '')
-    const path = `${root}/${HANDOFF_FILE}`
+    const root = slash(String(await $.session.root()))
     const now: number = await $.clock.now()
     const header = `<!-- auto-handoff: ${new Date(now).toISOString()} · ${why} · from session ${sessionId} -->\n\n`
-    await $.fs.write(path, header + text.trim() + '\n')
+    const content = header + text.trim() + '\n'
+    // A project keeps its own copy; the home copy survives a scratch workspace and keeps the last few.
+    const projectPath = isScratch(root) ? undefined : `${root}/${HANDOFF_FILE}`
+    if (projectPath !== undefined) await $.fs.write(projectPath, content)
+    const keptPath = await keepCopy($, content).catch(() => undefined)
+    const path = projectPath ?? keptPath
+    if (path === undefined) {
+      await say($, 'could not save the handoff anywhere, so nothing was cleared.')
+      return 'Could not save the handoff; the session is untouched.'
+    }
     await $.store.set('pending', { path, sessionId, savedAt: now } satisfies Pending)
     handedOffSession = sessionId
 

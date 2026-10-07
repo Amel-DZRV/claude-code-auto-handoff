@@ -12,7 +12,10 @@ const stubHost = (
   written: Map<string, string>,
   ran: string[],
   sessionId = 'old-session',
+  host: { root: string; listing: { name: string; mtimeMs: number }[] } = { root: 'C:\\proj', listing: [] },
 ) => {
+  on('env.get', () => ({ value: 'C:\\Users\\me' }))
+  on('fs.list', () => ({ value: host.listing }))
   on('store.get', ($: any, e: any) => ({ value: store.get(e.key) }))
   on('store.set', ($: any, e: any) => {
     store.set(e.key, e.value)
@@ -24,7 +27,7 @@ const stubHost = (
   })
   on('clock.now', () => ({ value: 1_000_000 }))
   on('session.id', () => ({ value: sessionId }))
-  on('session.root', () => ({ value: 'C:\\proj' }))
+  on('session.root', () => ({ value: host.root }))
   on('model.fork', () => ({ value: { isAnswered: true, text: '## Goal\nShip it', usage } }))
   on('fs.write', ($: any, e: any) => {
     written.set(e.path, e.text)
@@ -52,6 +55,37 @@ test('/handoff-now writes the file, saves the pending marker and clears', async 
   expect(text).toContain('## Goal')
   expect(ran).toEqual(['clear'])
   expect((store.get('pending') as { sessionId: string }).sessionId).toBe('old-session')
+  expect([...written.keys()].map(p => p.replace(/\\/g, '/'))).toContain('C:/Users/me/.claude/handoffs/handoff-1.md')
+})
+
+test('with no project folder the handoff is saved to the home folder and loaded from there', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const written = new Map<string, string>()
+  const ran: string[] = []
+  const host = { root: 'C:\\Users\\me\\AppData\\Roaming\\Claude\\scratch-workspaces\\a\\b\\scratch-1', listing: [] }
+  stubHost(on, store, written, ran, 'old-session', host)
+
+  await $.command.run({ command: 'handoff-now', args: '' })
+  await waitFor(() => ran.includes('clear'))
+
+  const paths = [...written.keys()].map(p => p.replace(/\\/g, '/'))
+  expect(paths).toEqual(['C:/Users/me/.claude/handoffs/handoff-1.md'])
+  expect((store.get('pending') as { path: string }).path.replace(/\\/g, '/')).toBe(paths[0])
+})
+
+test('a full set of kept handoffs reuses the oldest slot', async ($, on) => {
+  const written = new Map<string, string>()
+  const ran: string[] = []
+  const host = {
+    root: 'C:\\Users\\me\\AppData\\Roaming\\Claude\\scratch-workspaces\\a\\b\\scratch-1',
+    listing: [1, 2, 3, 4, 5].map(n => ({ name: `handoff-${n}.md`, mtimeMs: n === 3 ? 10 : 100 + n })),
+  }
+  stubHost(on, new Map(), written, ran, 'old-session', host)
+
+  await $.command.run({ command: 'handoff-now', args: '' })
+  await waitFor(() => ran.includes('clear'))
+
+  expect([...written.keys()].map(p => p.replace(/\\/g, '/'))).toEqual(['C:/Users/me/.claude/handoffs/handoff-3.md'])
 })
 
 test('the next session loads the handoff once', async ($, on) => {
