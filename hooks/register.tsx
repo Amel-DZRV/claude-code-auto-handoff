@@ -12,7 +12,7 @@ type Settings = {
   cacheTtlMinutes: number
 }
 
-type Pending = { path: string; sessionId: string; savedAt: number }
+type Pending = { path: string; sessionId: string; root: string; savedAt: number }
 
 const DEFAULTS: Settings = { enabled: true, threshold: 50, autoClear: true, autoResume: false, showBar: true, cacheTtlMinutes: 60 }
 
@@ -35,36 +35,59 @@ const SVG_WIDTH = 300
 const SVG_HEIGHT = 18
 const SVG_COLORS = { green: '#2da44e', yellow: '#d4a72c', red: '#e5484d' } as const
 const MAX_PENDING_AGE_MS = 6 * 60 * 60 * 1000
-const HANDOFF_FILE = '.claude/handoff.md'
+const HANDOFFS_DIR = '.claude/handoffs'
 const KEPT_DIR = '.claude/handoffs'
 const KEPT_SLOTS = 5
 
+// The store is shared by every session, so each project keeps its own pending handoff.
+const pendingKey = (root: string): string => `pending:${root}`
+
+// Every session that has handed off, newest last; one id in one key let two sessions re-arm each other.
+const MAX_HANDED_OFF = 20
+const handedOffIds = async ($: any): Promise<string[]> => {
+  const ids = await $.store.get('handedOff')
+  return Array.isArray(ids) ? ids : []
+}
+const markHandedOff = async ($: any, sessionId: string): Promise<void> => {
+  const ids = await handedOffIds($)
+  await $.store.set('handedOff', [...ids.filter(id => id !== sessionId), sessionId].slice(-MAX_HANDED_OFF))
+}
+
+const pad = (n: number) => String(n).padStart(2, '0')
+// Local time, then the session's first 8 characters, so two sessions in the same second never share a file.
+const handoffFileName = (now: number, sessionId: string): string => {
+  const d = new Date(now)
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  return `${stamp}-auto-handoff-${sessionId.slice(0, 8)}.md`
+}
+
 const SUMMARY_PROMPT = `Write a handoff for a fresh Claude Code session that will continue this work with no memory of this conversation.
-Use exactly these sections, in markdown:
+Use exactly these sections, in markdown, starting with the first heading (no frontmatter, no title):
 
-## Goal
-What the user is trying to achieve, in their terms.
+## Summary
+2-3 sentences: what this work is about, its current status, who it is for.
 
-## State
-What is done, what is half-done, and what is broken right now.
+## Current State
+Checkboxes: done, half-done, not started. Say what is broken right now.
 
-## Decisions
+## Key Decisions
 Choices made and the reason for each, so they are not re-litigated.
 
-## Open tasks
-A checklist, in the order to do them. Mark the very next step.
+## Open Issues
+Blockers, known bugs, dead ends already tried.
 
-## Key files
-Paths touched or needed, one line each on why.
+## Artifacts
+Files the next session needs, as file:line, one line each on why.
 
-## Gotchas
-Commands that work, dead ends already tried, anything surprising.
+## Next Steps
+Ordered, actionable. Item 1 is the very next thing to do.
 
-Be specific and terse. Output only the handoff, no preamble.`
+Prefer file:line references over pasted code. Be specific and terse. Output only the handoff.`
 
 // Module variables start over on a hot reload; the host's store does not.
 let isBusy = false
-let handedOffSession: string | undefined
+// Counts prompts this process has seen; a handoff compares before and after its summary.
+let promptCount = 0
 
 const loadSettings = async ($: any): Promise<Settings> => ({
   ...DEFAULTS,
@@ -203,11 +226,17 @@ const summarize = async ($: any): Promise<string | undefined> => {
     .map((m: any) => `${m.role.toUpperCase()}: ${m.text}`)
     .join('\n\n')
     .slice(-60000)
-  const completed = await $.model.complete({
-    model: 'sonnet',
-    prompt: `${SUMMARY_PROMPT}\n\n<transcript>\n${transcript}\n</transcript>`,
-    maxTokens: 4000,
-  })
+  // Managed settings can pin the model, so the fallback may be refused outright.
+  let completed: { isAnswered: boolean; text: string }
+  try {
+    completed = await $.model.complete({
+      model: 'sonnet',
+      prompt: `${SUMMARY_PROMPT}\n\n<transcript>\n${transcript}\n</transcript>`,
+      maxTokens: 4000,
+    })
+  } catch (error) {
+    throw new Error(`the fallback summary model was refused (${String(error)})`)
+  }
   return completed.isAnswered && completed.text.trim() !== '' ? completed.text : undefined
 }
 
@@ -234,6 +263,7 @@ const keepCopy = async ($: any, content: string): Promise<string | undefined> =>
 const handoff = async ($: any, why: string): Promise<string> => {
   if (isBusy) return 'A handoff is already running.'
   isBusy = true
+  const promptsBefore = promptCount
   try {
     const settings = await loadSettings($)
     await say(
@@ -247,28 +277,52 @@ const handoff = async ($: any, why: string): Promise<string> => {
     if (left !== undefined && left <= 0 && last !== undefined) {
       $.ui.toast(`Auto-handoff: the prompt cache is cold, so the summary re-bills about ${kilo(promptTokens(last))} tokens.`)
     }
-    const text = await summarize($)
+    const sessionId: string = await $.session.id()
+    const root = slash(String(await $.session.root()))
+    // A failure pauses the automatic handoff for this session, so it does not re-fork on every turn.
+    const PAUSED = 'Automatic handoff is paused for this session; run /handoff-now to try again.'
+    let text: string | undefined
+    try {
+      text = await summarize($)
+    } catch (error) {
+      await markHandedOff($, sessionId)
+      await say($, `could not write a summary: ${String(error)}; nothing was cleared. ${PAUSED}`)
+      return 'Could not write a summary; the session is untouched.'
+    }
     if (text === undefined) {
-      await say($, 'could not write a summary, so nothing was cleared.')
+      await markHandedOff($, sessionId)
+      await say($, `could not write a summary, so nothing was cleared. ${PAUSED}`)
       return 'Could not write a summary; the session is untouched.'
     }
 
-    const sessionId: string = await $.session.id()
-    const root = slash(String(await $.session.root()))
     const now: number = await $.clock.now()
-    const header = `<!-- auto-handoff: ${new Date(now).toISOString()} · ${why} · from session ${sessionId} -->\n\n`
+    // The writing-handoffs skill's frontmatter, so its resume mode can read the file. A JSON
+    // string is a valid YAML scalar, so a path with ' #' or ': ' still parses.
+    const header =
+      `---\n` +
+      `date: ${new Date(now).toISOString()}\n` +
+      `author: auto-handoff (session ${sessionId})\n` +
+      `type: session\n` +
+      `status: in-progress\n` +
+      `project: ${JSON.stringify(root)}\n` +
+      `reason: ${JSON.stringify(why)}\n` +
+      `---\n\n`
     const content = header + text.trim() + '\n'
-    // A project keeps its own copy; the home copy survives a scratch workspace and keeps the last few.
-    const projectPath = isScratch(root) ? undefined : `${root}/${HANDOFF_FILE}`
-    if (projectPath !== undefined) await $.fs.write(projectPath, content)
-    const keptPath = await keepCopy($, content).catch(() => undefined)
-    const path = projectPath ?? keptPath
+    // A project gets its own timestamped file, as the writing-handoffs skill does; a scratch
+    // workspace is deleted with the session, so it uses the home-folder slots instead.
+    const projectPath = isScratch(root) ? undefined : `${root}/${HANDOFFS_DIR}/${handoffFileName(now, sessionId)}`
+    // A repo that cannot be written (read-only, permissions) falls back to the home-folder slots.
+    const savedInProject =
+      projectPath !== undefined && (await $.fs.write(projectPath, content).then(() => true, () => false))
+    const path = savedInProject ? projectPath : await keepCopy($, content).catch(() => undefined)
     if (path === undefined) {
-      await say($, 'could not save the handoff anywhere, so nothing was cleared.')
+      await markHandedOff($, sessionId)
+      await say($, `could not save the handoff anywhere, so nothing was cleared. ${PAUSED}`)
       return 'Could not save the handoff; the session is untouched.'
     }
-    await $.store.set('pending', { path, sessionId, savedAt: now } satisfies Pending)
-    handedOffSession = sessionId
+    await $.store.set(pendingKey(root), { path, sessionId, root, savedAt: now } satisfies Pending)
+    // In the store, so a hot reload or a /auto-handoff bar change does not trigger a second handoff.
+    await markHandedOff($, sessionId)
 
     if (!settings.autoClear) {
       await say($, `handoff saved to ${path}. Run /clear and it loads into the new session.`)
@@ -276,6 +330,11 @@ const handoff = async ($: any, why: string): Promise<string> => {
     }
 
     await say($, `handoff saved to ${path}. Starting a fresh session…`)
+    // Checked last, right before the /clear, which would wipe a prompt the user sent during the handoff.
+    if (promptCount !== promptsBefore) {
+      await say($, `handoff saved to ${path}, but you sent a new prompt meanwhile, so the session was not cleared. Run /clear yourself when ready.`)
+      return `Handoff saved to ${path}; the session was not cleared. Run /clear yourself.`
+    }
     try {
       await $.command.run({ command: 'clear' })
     } catch (error) {
@@ -295,7 +354,7 @@ const checkContext = async ($: any): Promise<void> => {
   const settings = await loadSettings($)
   if (!settings.enabled) return
   const sessionId: string = await $.session.id()
-  if (handedOffSession === sessionId) return
+  if ((await handedOffIds($)).includes(sessionId)) return
   const { context } = await $.session.usage()
   if ((context.percent ?? 0) < settings.threshold) return
   await handoff($, `context at ${Math.round(context.percent)}%`)
@@ -313,6 +372,17 @@ const USAGE =
 const fillColor = (percent: number, threshold: number): 'red' | 'yellow' | 'green' =>
   percent >= threshold ? 'red' : percent >= threshold * 0.8 ? 'yellow' : 'green'
 
+// One toast, the first time the mod runs for this user, so the auto-clear is not a surprise.
+const introduce = async ($: any): Promise<void> => {
+  if ((await $.store.get('introduced')) === true) return
+  const settings = await loadSettings($)
+  $.ui.toast(
+    `auto-handoff is on: at ${settings.threshold}% context it writes a handoff and clears the session. ` +
+      `/auto-handoff clear off keeps the session; /auto-handoff off disables it.`,
+  )
+  await $.store.set('introduced', true)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -324,6 +394,7 @@ export const register: Register = on => {
       description: 'Write the handoff file now, and clear the session when auto-clear is on',
     })
     quietly($, loadSettings($).then(settings => saveSettingsView($, settings)).then(() => refreshBar($)))
+    quietly($, introduce($))
     // Redraws the cache countdown; timers die with a reload and start again here.
     $.clock.every(TICK_MS, () => {
       quietly($, tickCountdown($))
@@ -357,17 +428,21 @@ export const register: Register = on => {
 
   // The first prompt of a conversation carries the handoff the previous session left.
   on('prompt.context', async ($, e, next) => {
+    promptCount += 1
     const result = await next(e)
-    const pending = (await $.store.get('pending')) as Pending | undefined
+    const key = pendingKey(slash(String(await $.session.root())))
+    const pending = (await $.store.get(key)) as Pending | undefined
     if (pending === undefined) return result
     const now: number = await $.clock.now()
     const isStale = now - pending.savedAt > MAX_PENDING_AGE_MS
-    const isSameSession = pending.sessionId === (await $.session.id())
-    if (isStale) await $.store.delete('pending')
-    if (isStale || isSameSession) return result
+    if (isStale) {
+      await $.store.delete(key)
+      return result
+    }
+    if (pending.sessionId === (await $.session.id())) return result
 
     const text = await $.fs.read(pending.path).catch(() => undefined)
-    await $.store.delete('pending')
+    await $.store.delete(key)
     if (typeof text !== 'string') return result
     $.ui.toast('Loaded the handoff from your previous session.')
     return {
@@ -377,7 +452,7 @@ export const register: Register = on => {
         {
           name: 'handoff',
           text:
-            'Handoff from the previous session, which ran out of room. ' +
+            'Handoff from the previous session, which ended at its context threshold. ' +
             'Treat it as the starting state and continue the work it describes.\n\n' +
             text,
         },
@@ -396,6 +471,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'auto-handoff' }, async ($, e) => {
     const settings = await loadSettings($)
+    const before = { ...settings }
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(Boolean)
     const [first, second] = words
 
@@ -424,7 +500,10 @@ export const register: Register = on => {
     } else return { text: USAGE }
 
     await saveSettings($, settings)
-    handedOffSession = undefined
+    // A new threshold or turning it back on is a fresh decision; the bar, clear, resume and ttl are not.
+    if (before.enabled !== settings.enabled || before.threshold !== settings.threshold) {
+      await $.store.delete('handedOff')
+    }
     return { text: describe(settings) }
   })
 
