@@ -88,6 +88,21 @@ Prefer file:line references over pasted code. Be specific and terse. Output only
 let isBusy = false
 // Counts prompts this process has seen; a handoff compares before and after its summary.
 let promptCount = 0
+// Set once the model was told mid-turn to wrap up; reset when the turn ends.
+let isNudged = false
+// The session told it is waiting for background agents, so the notice is said once.
+let waitingFor: string | undefined
+
+// A /clear ends every agent still working, so a handoff waits for these.
+const BUSY_STATUSES = new Set(['pending', 'running', 'waiting'])
+type ActiveAgent = { id: string; description: string; type: string; status: string; name?: string }
+const activeAgents = async ($: any): Promise<ActiveAgent[]> => {
+  const agents: ActiveAgent[] = await $.agent.list().catch(() => [])
+  return agents.filter(agent => BUSY_STATUSES.has(agent.status))
+}
+const agentLine = (agent: ActiveAgent): string =>
+  `- ${agent.description} (${agent.type}, ${agent.status}, id ${agent.id}${agent.name === undefined ? '' : `, name ${agent.name}`})`
+const agentsPhrase = (count: number): string => (count === 1 ? '1 background agent is' : `${count} background agents are`)
 
 const loadSettings = async ($: any): Promise<Settings> => ({
   ...DEFAULTS,
@@ -335,6 +350,12 @@ const handoff = async ($: any, why: string): Promise<string> => {
       await say($, `handoff saved to ${path}, but you sent a new prompt meanwhile, so the session was not cleared. Run /clear yourself when ready.`)
       return `Handoff saved to ${path}; the session was not cleared. Run /clear yourself.`
     }
+    // The /clear would cut off agents still working; their results belong to this session.
+    const busy = await activeAgents($)
+    if (busy.length > 0) {
+      await say($, `handoff saved to ${path}, but ${agentsPhrase(busy.length)} still running, so the session was not cleared. Run /clear yourself once they finish.`)
+      return `Handoff saved to ${path}; the session was not cleared while ${agentsPhrase(busy.length)} running. Run /clear yourself.`
+    }
     try {
       await $.command.run({ command: 'clear' })
     } catch (error) {
@@ -357,8 +378,29 @@ const checkContext = async ($: any): Promise<void> => {
   if ((await handedOffIds($)).includes(sessionId)) return
   const { context } = await $.session.usage()
   if ((context.percent ?? 0) < settings.threshold) return
+  // Each background agent's result arrives as a new turn, so the next turn end checks again.
+  const busy = await activeAgents($)
+  if (busy.length > 0) {
+    if (waitingFor !== sessionId) {
+      waitingFor = sessionId
+      await say($, `context at ${Math.round(context.percent)}%, but ${agentsPhrase(busy.length)} still running. The handoff waits until they finish.`)
+    }
+    return
+  }
   await handoff($, `context at ${Math.round(context.percent)}%`)
 }
+
+// Whether the main thread is past the threshold with a handoff still to come.
+const isPastThreshold = async ($: any, percent: number | undefined): Promise<boolean> => {
+  const settings = await loadSettings($)
+  if (!settings.enabled || (percent ?? 0) < settings.threshold) return false
+  return !(await handedOffIds($)).includes(await $.session.id())
+}
+
+const WRAP_UP =
+  'auto-handoff: the context is past the handoff threshold. The handoff runs only once this turn ends, ' +
+  'and the session may be compacted first if the turn keeps going. Finish the step in hand, ' +
+  'do not start new long work or new background agents, and end the turn soon.'
 
 const describe = (s: Settings) =>
   `auto-handoff is ${s.enabled ? 'on' : 'off'} · threshold ${s.threshold}% · ` +
@@ -410,15 +452,39 @@ export const register: Register = on => {
   })
 
   // Each tool call follows a model response, so the bar fills while a long turn runs.
-  on('tool.call', ($, e, next) => {
-    if (e.agentId === undefined) quietly($, refreshBar($))
-    return next(e)
-  })
+  // Past the threshold mid-turn, the result tells the model to end the turn so the handoff can run.
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    quietly($, refreshBar($))
+    const result = await next(e)
+    if (isNudged || result.deny !== undefined || result.isError === true) return result
+    const isPast = await $.session
+      .usage()
+      .then(({ context }: any) => isPastThreshold($, context.percent))
+      .catch(() => false)
+    if (!isPast) return result
+    isNudged = true
+    return { ...result, context: [...(result.context ?? []), WRAP_UP] }
+  }).catch(($, e, next) => next(e))
+
+  // An automatic compaction got there before the handoff: keep the running agents in what survives it.
+  on('session.compact', { trigger: 'auto' }, async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const busy = await activeAgents($)
+    if (busy.length === 0) return next(e)
+    const keep =
+      'Background agents are still running and will report back to this session. ' +
+      'Keep each one in the summary, with its id and name, what it was asked to do and that its result is still awaited:\n' +
+      busy.map(agentLine).join('\n')
+    void say($, `the session is being compacted before the handoff ran; the summary keeps the ${busy.length} running background agent(s).`)
+    return next({ ...e, instructions: e.instructions === undefined ? keep : `${e.instructions}\n\n${keep}` })
+  }).catch(($, e, next) => next(e))
 
   // The turn has ended: the session is idle enough for a fork and a queued /clear.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId !== undefined || e.reason !== 'answer') return result
+    isNudged = false
     quietly($, refreshBar($))
     void checkContext($).catch((error: unknown) => {
       void say($, `failed: ${String(error)}`)

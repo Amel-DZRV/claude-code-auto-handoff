@@ -41,6 +41,7 @@ const stubHost = (
     return { value: undefined }
   })
   on('ui.toast', () => ({ value: undefined }))
+  on('agent.list', () => ({ value: [] }))
   on('command.run', ($: any, e: any) => {
     ran.push(e.command)
     return { text: '' }
@@ -409,4 +410,87 @@ test('a failed automatic summary is not retried on every turn', async ($, on) =>
 
   expect(forks).toBe(1)
   expect((store.get('lastHandoff') as { text: string }).text).toContain('/handoff-now')
+})
+
+const runningAgent = { id: 'a1', description: 'Build the Nutrition seeds', type: 'general-purpose', status: 'running', name: 'seeds' }
+
+test('the automatic handoff waits while a background agent runs, then hands off once it is done', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const written = new Map<string, string>()
+  const ran: string[] = []
+  let agents: unknown[] = [runningAgent]
+  stubHost(on, store, written, ran, 'old-session', undefined, {
+    'agent.list': () => ({ value: agents }),
+  })
+  stubTurnEnd(on, 90)
+
+  await $.turn.complete({ turnId: 't', reason: 'answer', answer: 'done' })
+  await waitFor(() => String((store.get('lastHandoff') as { text: string } | undefined)?.text).includes('waits'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+  expect(written.size).toBe(0)
+  expect(ran).not.toContain('clear')
+
+  agents = [{ ...runningAgent, status: 'completed' }]
+  await $.turn.complete({ turnId: 't', reason: 'answer', answer: 'done' })
+  await waitFor(() => ran.includes('clear'))
+  expect(written.size).toBe(1)
+})
+
+test('/handoff-now saves but does not clear while a background agent runs', async ($, on) => {
+  const store = new Map<string, unknown>()
+  const written = new Map<string, string>()
+  const ran: string[] = []
+  stubHost(on, store, written, ran, 'old-session', undefined, {
+    'agent.list': () => ({ value: [runningAgent] }),
+  })
+
+  await $.command.run({ command: 'handoff-now', args: '' })
+  await waitFor(() => String((store.get('lastHandoff') as { text: string } | undefined)?.text).includes('not cleared'))
+  await new Promise(resolve => setTimeout(resolve, 20))
+
+  expect(written.size).toBe(1)
+  expect(ran).not.toContain('clear')
+  expect((store.get('lastHandoff') as { text: string }).text).toContain('background agent')
+})
+
+test('past the threshold mid-turn, one tool result tells the model to end the turn', async ($, on) => {
+  stubHost(on, new Map(), new Map(), [])
+  on('session.usage', () => ({ value: { context: { window: 200000, percent: 70 } } }))
+  on('tool.call', () => ({ result: { stdout: 'ok' }, text: 'ok' }))
+
+  const first = await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  const second = await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+
+  expect(String(first.context?.[0])).toContain('end the turn')
+  expect(second.context ?? []).toHaveLength(0)
+})
+
+test('under the threshold, tool results are left alone', async ($, on) => {
+  stubHost(on, new Map(), new Map(), [])
+  on('session.usage', () => ({ value: { context: { window: 200000, percent: 20 } } }))
+  on('tool.call', () => ({ result: { stdout: 'ok' }, text: 'ok' }))
+
+  const result = await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  expect(result.context ?? []).toHaveLength(0)
+})
+
+test('an automatic compaction keeps the running background agents in its summary', async ($, on) => {
+  let instructions: string | undefined
+  stubHost(on, new Map(), new Map(), [], 'old-session', undefined, {
+    'agent.list': () => ({ value: [runningAgent, { ...runningAgent, id: 'a2', status: 'completed' }] }),
+  })
+  const messages = [{ role: 'user', text: 'summary', toolUses: [] }] as any
+  on('session.compact', ($: any, e: any) => {
+    instructions = e.instructions
+    return { messages }
+  })
+
+  await $.session.compact({ trigger: 'auto', messages })
+  expect(instructions).toContain('Build the Nutrition seeds')
+  expect(instructions).toContain('id a1')
+  expect(instructions).not.toContain('a2')
+
+  instructions = undefined
+  await $.session.compact({ trigger: 'manual', instructions: 'the plan', messages })
+  expect(instructions).toBe('the plan')
 })
