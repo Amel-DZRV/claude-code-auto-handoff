@@ -6,6 +6,9 @@ const waitFor = async (isDone: () => boolean) => {
   for (let i = 0; i < 200 && !isDone(); i++) await new Promise(resolve => setTimeout(resolve, 5))
 }
 
+// The host joins paths with the platform's separator and may add a drive letter; the tests compare the POSIX form.
+const posix = (path: string): string => path.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
+
 // The one pending handoff a test has saved, whatever project key it sits under.
 const pendingOf = (store: Map<string, unknown>): any => [...store.entries()].find(([key]) => key.startsWith('pending:'))?.[1]
 
@@ -58,12 +61,12 @@ test('/handoff-now writes a timestamped file in the project, saves the pending m
   await waitFor(() => ran.includes('clear'))
 
   expect(answer.text).toBe('Writing the handoff…')
-  const paths = [...written.keys()].map(p => p.replace(/\\/g, '/'))
+  const paths = [...written.keys()].map(posix)
   expect(paths).toHaveLength(1)
   expect(paths[0]).toMatch(/^\/proj\/\.claude\/handoffs\/\d{4}-\d{2}-\d{2}-\d{6}-auto-handoff-old-sess\.md$/)
   expect(written.get([...written.keys()][0]!)).toContain('## Summary')
   expect(ran).toEqual(['clear'])
-  expect((pendingOf(store) as { path: string }).path.replace(/\\/g, '/')).toBe(paths[0])
+  expect(posix((pendingOf(store) as { path: string }).path)).toBe(paths[0])
 })
 
 test('two sessions handing off in the same second get different files', async ($, on) => {
@@ -87,9 +90,9 @@ test('with no project folder the handoff is saved to the home folder and loaded 
   await $.command.run({ command: 'handoff-now', args: '' })
   await waitFor(() => ran.includes('clear'))
 
-  const paths = [...written.keys()].map(p => p.replace(/\\/g, '/'))
+  const paths = [...written.keys()].map(posix)
   expect(paths).toEqual(['/Users/me/.claude/handoffs/handoff-1.md'])
-  expect((pendingOf(store) as { path: string }).path.replace(/\\/g, '/')).toBe(paths[0])
+  expect(posix((pendingOf(store) as { path: string }).path)).toBe(paths[0])
 })
 
 test('a full set of kept handoffs reuses the oldest slot', async ($, on) => {
@@ -104,7 +107,7 @@ test('a full set of kept handoffs reuses the oldest slot', async ($, on) => {
   await $.command.run({ command: 'handoff-now', args: '' })
   await waitFor(() => ran.includes('clear'))
 
-  expect([...written.keys()].map(p => p.replace(/\\/g, '/'))).toEqual(['/Users/me/.claude/handoffs/handoff-3.md'])
+  expect([...written.keys()].map(posix)).toEqual(['/Users/me/.claude/handoffs/handoff-3.md'])
 })
 
 test('the next session loads the handoff once', async ($, on) => {
@@ -321,7 +324,7 @@ test('a project folder that cannot be written falls back to the home folder', as
   const ran: string[] = []
   stubHost(on, store, written, ran, 'old-session', undefined, {
     'fs.write': (_: any, e: any) => {
-      if (String(e.path).includes('/proj/')) throw new Error('read-only file system')
+      if (posix(String(e.path)).includes('/proj/')) throw new Error('read-only file system')
       written.set(e.path, e.text)
       return { value: undefined }
     },
@@ -330,8 +333,8 @@ test('a project folder that cannot be written falls back to the home folder', as
   await $.command.run({ command: 'handoff-now', args: '' })
   await waitFor(() => ran.includes('clear'))
 
-  expect([...written.keys()]).toEqual(['/Users/me/.claude/handoffs/handoff-1.md'])
-  expect((pendingOf(store) as { path: string }).path).toBe('/Users/me/.claude/handoffs/handoff-1.md')
+  expect([...written.keys()].map(posix)).toEqual(['/Users/me/.claude/handoffs/handoff-1.md'])
+  expect(posix((pendingOf(store) as { path: string }).path)).toBe('/Users/me/.claude/handoffs/handoff-1.md')
 })
 
 test('a Windows session root with backslashes matches the saved project root', async ($, on) => {

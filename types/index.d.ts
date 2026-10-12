@@ -30,8 +30,24 @@ export type Requests = {
   tick: number
 }
 
+/** The /keepwarm window: pings that keep the prompt cache from lapsing while the user is away. */
+export type Keepwarm = {
+  /** When the window ends, ms since the epoch; null when keepwarm is off or has stopped. */
+  until: number | null
+  /** A shorter ping period than the default, ms; null for the default. */
+  customEveryMs: number | null
+  /** Pings sent in this window. */
+  pings: number
+  /** Dollars those pings cost by the list prices; a model with no known price counts as 0. */
+  spent: number
+  /** The latest ping, as the API reported it; kept after a stop so the reason has its receipt. */
+  lastPing: { at: number; read: number; write: number; cost: number | null } | null
+  /** Why the window ended by itself or at a handoff; null while it runs and after /keepwarm off. */
+  stopped: string | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'auto-handoff': { bar: ContextBar; requests: Requests }
+    'auto-handoff': { bar: ContextBar; requests: Requests; keepwarm: Keepwarm }
   }
 }

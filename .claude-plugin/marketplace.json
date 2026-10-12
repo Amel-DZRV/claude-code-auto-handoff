@@ -6,7 +6,7 @@
     {
       "name": "auto-handoff",
       "source": "./",
-      "description": "Context bar, prompt-cache countdown, and automatic handoff at a context threshold."
+      "description": "Context bar, prompt-cache countdown, automatic handoff at a context threshold, and opt-in cache keep-warm pings."
     }
   ]
 }
